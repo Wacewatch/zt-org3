@@ -1,0 +1,1 @@
+- [Source-account access](source-account-access.md) — User confirms an authorized account may be used; keep credentials in Secrets and never reuse cookies pasted in chat.
