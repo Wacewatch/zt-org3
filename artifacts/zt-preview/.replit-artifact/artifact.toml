@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "ZT Search Preview"
+description = "Preview of the ZT Search application imported from the user's archive, preserving its existing interface and Next.js API proxy routes."
+version = "1.0.0"
+id = "artifacts/zt-preview"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 24788
+
+[services.development]
+run = "pnpm --filter @workspace/zt-preview run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/zt-preview", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/zt-preview/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "24788"
+BASE_PATH = "/"
