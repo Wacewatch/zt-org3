@@ -1,7 +1,7 @@
 kind = "web"
 previewPath = "/"
-title = "ZT Search Preview"
-description = "Preview of the ZT Search application imported from the user's archive, preserving its existing interface and Next.js API proxy routes."
+title = "ZT Search"
+description = "Application web de recherche ZT pour parcourir les films, séries, jeux et autres catégories de contenu et consulter les informations et liens disponibles."
 version = "1.0.0"
 id = "artifacts/zt-preview"
 router = "path"
@@ -26,3 +26,24 @@ to = "/index.html"
 [services.env]
 PORT = "24788"
 BASE_PATH = "/"
+
+[[services]]
+name = "search-api"
+paths = [ "/zt-api", "/liens/movie", "/liens/series" ]
+localPort = 25544
+
+[services.development]
+run = "cd backend && python3 -m uvicorn server:app --host 0.0.0.0 --port $PORT"
+
+[services.production]
+build = [ "sh", "-c", "uv pip install --python \"$(command -v python)\" -r artifacts/zt-preview/backend/requirements.txt" ]
+
+[services.production.run]
+args = [ "sh", "-c", "cd artifacts/zt-preview/backend && python -m uvicorn server:app --host 0.0.0.0 --port ${PORT:-25544}" ]
+
+[services.production.health.startup]
+path = "/zt-api/api/status"
+
+[services.env]
+PORT = "25544"
+ZT_DATA_DIR = ".data"

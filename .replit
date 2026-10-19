@@ -11,27 +11,6 @@ env = { "CI" = "true" }
 [workflows]
 runButton = "Project"
 
-[[workflows.workflow]]
-name = "Project"
-mode = "parallel"
-author = "agent"
-
-[[workflows.workflow.tasks]]
-task = "workflow.run"
-args = "ZT Backend"
-
-[[workflows.workflow]]
-name = "ZT Backend"
-author = "agent"
-
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "python3 -m uvicorn server:app --app-dir artifacts/zt-preview/backend --host 0.0.0.0 --port 8000"
-waitForPort = 8000
-
-[workflows.workflow.metadata]
-outputType = "console"
-
 [agent]
 stack = "PNPM_WORKSPACE"
 expertMode = true

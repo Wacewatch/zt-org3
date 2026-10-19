@@ -12,7 +12,7 @@ from pathlib import Path
 
 import httpx
 from curl_cffi.requests import AsyncSession
-from motor.motor_asyncio import AsyncIOMotorClient
+from state import get_proxies, save_proxies
 
 logger = logging.getLogger(__name__)
 
@@ -42,10 +42,6 @@ PROXY_SOURCES = [
     ('socks5', 'https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt'),
 ]
 
-# MongoDB is optional for local preview. The proxy manager can still use the
-# bundled seed and public sources when no database variables are configured.
-_mongo_url = os.environ.get('MONGO_URL')
-_db = AsyncIOMotorClient(_mongo_url)[os.environ.get('DB_NAME', 'zt_search')] if _mongo_url else None
 _pool: list = []
 _idx = 0
 _refill_lock = asyncio.Lock()
@@ -75,13 +71,8 @@ async def _load_seed() -> list:
 
 
 async def _load_db(fresh_only: bool = True) -> list:
-    if _db is None:
-        return []
-    q = {}
-    if fresh_only:
-        q = {'last_ok': {'$gt': time.time() - DB_FRESH_SECONDS}}
-    docs = await _db.proxy_pool.find(q).sort('last_ok', -1).to_list(500)
-    return [d['_id'] for d in docs]
+    fresh_after = time.time() - DB_FRESH_SECONDS if fresh_only else None
+    return get_proxies(fresh_after)
 
 
 async def _download_sources() -> list:
@@ -133,14 +124,9 @@ async def _validate(candidates: list, target: int) -> list:
 
 
 async def _persist(working: list):
-    if not working or _db is None:
-        return
-    now = time.time()
     if working:
-        from pymongo import UpdateOne
-        ops = [UpdateOne({'_id': p}, {'$set': {'last_ok': now}}, upsert=True) for p in working]
         try:
-            await _db.proxy_pool.bulk_write(ops, ordered=False)
+            save_proxies(working, time.time())
         except Exception as e:
             logger.warning(f'proxy persist failed: {e}')
 

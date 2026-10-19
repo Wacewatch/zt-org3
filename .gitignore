@@ -47,3 +47,4 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+artifacts/zt-preview/backend/.data/

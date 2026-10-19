@@ -6,6 +6,8 @@ import logging
 import re
 import time
 import asyncio
+from difflib import SequenceMatcher
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from urllib.parse import urlencode, quote, urlparse
@@ -14,16 +16,25 @@ import base64
 from fastapi import Header, HTTPException
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
+from secrets import compare_digest
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 import fetcher  # noqa: E402
+from link_cache import detail_link_cache  # noqa: E402
 
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
+liens_router = APIRouter()
+
+
+@app.get("/", include_in_schema=False)
+async def root_health():
+    return {"status": "ok"}
+
 
 # Config
-BASE_URL = 'https://www.zone-telechargement.org'
+BASE_URL = fetcher.BASE_URL
 FETCH_TIMEOUT = 15
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36'
 
@@ -337,12 +348,20 @@ def is_stream_host(url: str) -> bool:
 
 
 # HTTP helpers (relais -> ScraperAPI -> direct)
-async def http_fetch(url: str, timeout: int = FETCH_TIMEOUT) -> Optional[str]:
-    return await fetcher.fetch(url, timeout)
+async def http_fetch(
+    url: str,
+    timeout: int = FETCH_TIMEOUT,
+    attempts: int = 8,
+) -> Optional[str]:
+    return await fetcher.fetch(url, timeout, attempts=attempts)
 
 
-async def http_fetch_multi(urls: list, timeout: int = FETCH_TIMEOUT) -> dict:
-    return await fetcher.fetch_many(urls, timeout)
+async def http_fetch_multi(
+    urls: list,
+    timeout: int = FETCH_TIMEOUT,
+    attempts: int = 8,
+) -> dict:
+    return await fetcher.fetch_many(urls, timeout, attempts=attempts)
 
 
 # Section-prefix → normalized type (new .org SEO URL scheme /{section}/{id}-{slug}.html)
@@ -350,15 +369,32 @@ SECTION_TYPE = {
     'top-films': 'movie', 'film-gratuit': 'movie', 'nouveaux-films': 'movie',
     'film-mkv': 'movie', 'web-2160p-1080p-720p': 'movie',
     'derniers-web-dl-ajoutes': 'movie', 'derniers-blu-rays-ajoutes': 'movie',
+    'films': 'movie', 'films-gratuits': 'movie', 'top-film': 'movie',
     'dernieres-series-vf-ajoutees': 'tv', 'dernieres-series-vostfr-ajoutees': 'tv',
     'telecharger-serie': 'tv', 'ancienne-serie': 'tv', 'series': 'tv',
+    'top-series': 'tv', 'series-vf': 'tv', 'series-vostfr': 'tv',
+    'series-hd': 'tv', 'series-web-dl': 'tv',
     'animes': 'anime', 'manga': 'anime',
+    'mangas': 'anime', 'top-animes': 'anime',
     'jeux-gratuit': 'jeux', 'derniers-jeux-ajoutes': 'jeux',
+    'jeux': 'jeux',
     'musique-mp3-gratuite': 'musique', 'musique': 'musique',
+    'musiques': 'musique',
     'ebooks': 'ebook', 'ebook': 'ebook',
+    'e-books': 'ebook',
     'logiciels': 'logiciel',
     'documentaire-gratuit': 'documentaire', 'spectacles': 'spectacle',
     'emissions-tv': 'emission', 'sport': 'sport',
+    'autres-videos': 'autre-video', 'autre-video': 'autre-video',
+    'autres-videos-gratuits': 'autre-video',
+}
+
+OTHER_VIDEO_CATEGORY_PATTERNS = {
+    'documentaire': re.compile(r'\b(?:documentaires?|documentary)\b', re.I),
+    'emission': re.compile(r'\b(?:émissions?|emissions?|reportages?|enquêtes?|enquetes?|magazines?)\b', re.I),
+    'spectacle': re.compile(r'\b(?:spectacles?|stand[\s-]?up|one[\s-]?man)\b', re.I),
+    'concert': re.compile(r'\bconcerts?\b', re.I),
+    'sport': re.compile(r'\b(?:sports?|matchs?|football|rugby|tennis|basketball|boxe)\b', re.I),
 }
 
 
@@ -447,7 +483,12 @@ def category_from_url(url: str) -> str:
     sec = m.group(1).lower()
     t = SECTION_TYPE.get(sec, '')
     # series released under film/format prefixes
-    if t == 'movie' and re.search(r'(?:-saison-|-serie-|-integrale-|\bS\d{1,2}\b)', url, re.I):
+    if t == 'movie' and re.search(
+        r'(?:-saison-\d+|-season-\d+|-serie-|-integrale-|'
+        r'\bS\d{1,2}(?:E\d{1,3})?(?:[._-]|$))',
+        url,
+        re.I,
+    ):
         t = 'tv'
     return t
 
@@ -456,10 +497,124 @@ def filter_by_category(items: list, type_: str) -> list:
     target = normalize_type_alias(type_)
     out = []
     for it in items:
-        t = category_from_url(it['pageUrl'])
-        if not t or t == target:
+        t = category_from_url(it.get('pageUrl', ''))
+        if t == 'autre-video' and target in OTHER_VIDEO_CATEGORY_PATTERNS:
+            text = ' '.join(
+                str(it.get(key) or '')
+                for key in ('title', 'slugTitle', 'pageUrl')
+            )
+            if OTHER_VIDEO_CATEGORY_PATTERNS[target].search(text):
+                t = target
+        if t == target:
             out.append(it)
     return out
+
+
+def extract_release_metadata(html: str) -> List[Dict[str, Any]]:
+    """Extract red release labels and file sizes shown above hoster buttons."""
+    size_pattern = re.compile(
+        r'\b(\d+(?:[.,]\d+)?\s*(?:Kio|Mio|Gio|Tio|Ko|Mo|Go|To|KB|MB|GB|TB))\b',
+        re.I,
+    )
+    release_hint = re.compile(
+        r'\b(?:19\d{2}|20\d{2}|2160p?|1080p?|720p?|480p?|WEB[-\s]?DL|WEBRIP|'
+        r'BLU[-\s]?RAY|BLURAY|BDRIP|HDLIGHT|TRUEFRENCH|VOSTFR|MULTI|X26[45]|H\.?26[45])\b',
+        re.I,
+    )
+    color_pattern = re.compile(
+        r'(?:color\s*:\s*(?:red|#f00|#ff0000)\b|'
+        r'color\s*=\s*["\']?(?:red|#f00|#ff0000)\b)',
+        re.I,
+    )
+
+    found: List[Dict[str, Any]] = []
+    seen = set()
+
+    class RedReleaseParser(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.active = []
+            self.position = 0
+
+        def handle_starttag(self, tag, attrs):
+            attr_text = ' '.join(
+                f'{name}="{value or ""}"' for name, value in attrs
+            )
+            for candidate in self.active:
+                if tag == candidate['tag']:
+                    candidate['depth'] += 1
+                candidate['parts'].append(' ')
+            if color_pattern.search(attr_text):
+                self.active.append({
+                    'tag': tag, 'depth': 1, 'parts': [],
+                    'position': self.position,
+                })
+                self.position += 1
+
+        def handle_startendtag(self, tag, attrs):
+            for candidate in self.active:
+                candidate['parts'].append(' ')
+
+        def handle_data(self, data):
+            for candidate in self.active:
+                candidate['parts'].append(data)
+
+        def handle_endtag(self, tag):
+            retained = []
+            for candidate in self.active:
+                if tag == candidate['tag']:
+                    candidate['depth'] -= 1
+                    if candidate['depth'] == 0:
+                        self.add_candidate(candidate)
+                        continue
+                else:
+                    candidate['parts'].append(' ')
+                retained.append(candidate)
+            self.active = retained
+
+        def add_candidate(self, candidate):
+            text = hd(re.sub(r'\s+', ' ', ' '.join(candidate['parts']))).strip()
+            if len(text) < 6 or text.lower() in seen:
+                return
+            if re.match(r'^(?:qualit[eé]\b|liens?\b|t[eé]l[eé]charger\b)', text, re.I):
+                return
+            if len(text) > 250:
+                return
+
+            size_match = size_pattern.search(text)
+            if not size_match and not release_hint.search(text):
+                return
+            size = size_match.group(1).strip() if size_match else ''
+            release_name = text
+            if size_match:
+                release_name = (
+                    text[:size_match.start()] + text[size_match.end():]
+                ).strip(' ()[]{}-–|:')
+            if not release_name:
+                return
+
+            seen.add(text.lower())
+            found.append({
+                'position': candidate['position'],
+                'release': text,
+                'releaseName': release_name,
+                'releaseSize': size,
+            })
+
+    parser = RedReleaseParser()
+    parser.feed(html)
+    parser.close()
+
+    found.sort(
+        key=lambda entry: (
+            bool(entry['releaseSize']),
+            bool(release_hint.search(entry['release'])),
+            -len(entry['release']),
+            -entry['position'],
+        ),
+        reverse=True,
+    )
+    return found
 
 
 # Detail page scraper
@@ -483,6 +638,8 @@ def scrape_detail_html(html: str, page_url: str = '') -> dict:
     cm = re.search(r'<div\s+id=["\']dle-content["\'][^>]*>(.*?)(?:<div\s+class=["\']c-share|<div\s+class=["\']pheading|<footer)', html, re.I | re.S)
     if cm:
         content = cm.group(1)
+    release_candidates = extract_release_metadata(content)
+    release_info = release_candidates[0] if release_candidates else {}
 
     # Big title
     big_title = ''
@@ -508,6 +665,10 @@ def scrape_detail_html(html: str, page_url: str = '') -> dict:
 
     # Meta extraction
     meta = {'title': big_title, 'poster': poster}
+    if release_info:
+        meta['release'] = release_info.get('release', '')
+        meta['releaseName'] = release_info.get('releaseName', '')
+        meta['releaseSize'] = release_info.get('releaseSize', '')
     meta_labels = {
         'Origine': 'origin', 'Nationalité': 'origin',
         'Réalisation': 'director', 'Réalisateur(s)': 'director', 'Réalisateur': 'director',
@@ -619,7 +780,7 @@ def scrape_detail_html(html: str, page_url: str = '') -> dict:
             se_info = extract_season_episode(big_title + ' ' + page_url)
 
     # Global size
-    global_size = meta.get('size_meta', '')
+    global_size = meta.get('size_meta', '') or release_info.get('releaseSize', '')
 
     # Extract links
     download_links = []
@@ -664,7 +825,10 @@ def scrape_detail_html(html: str, page_url: str = '') -> dict:
             'host': host_label.strip() or hp['host'],
             'protection': hp['protection'],
             'filename': link_text if link_text and len(link_text) > 2 else '',
-            'size': size or global_size,
+            'size': size or release_info.get('releaseSize') or global_size,
+            'release': release_info.get('release', ''),
+            'releaseName': release_info.get('releaseName', ''),
+            'releaseSize': release_info.get('releaseSize', ''),
             'season': link_se.get('season') or se_info.get('season'),
             'episode': link_se.get('episode') or se_info.get('episode'),
         }
@@ -737,66 +901,126 @@ def scrape_detail_html(html: str, page_url: str = '') -> dict:
     }
 
 
-async def resolve_zoneurs_batch(links: list) -> list:
-    to_fetch = {}
-    for idx, lk in enumerate(links):
-        if lk.get('url') and re.match(r'^https?://(?:www\.)?zoneurs\.net/', lk['url'], re.I):
-            to_fetch[idx] = lk['url']
+async def resolve_zoneurs_batch(
+    links: list,
+    timeout: int = 12,
+    attempts: int = 8,
+    max_retries: int = 3,
+) -> list:
+    zoneurs_pattern = r'^https?://(?:www\.)?zoneurs\.net/'
+    for link in links:
+        if (
+            link.get('protection') == 'zoneurs'
+            and link.get('url')
+            and not re.match(zoneurs_pattern, link['url'], re.I)
+        ):
+            # The destination was already decoded from the redirect URL.
+            link['protection'] = ''
 
-    if not to_fetch:
-        return links
+    def _pending_links() -> dict:
+        return {
+            idx: lk['url']
+            for idx, lk in enumerate(links)
+            if lk.get('url') and re.match(zoneurs_pattern, lk['url'], re.I)
+        }
 
-    html_map = await http_fetch_multi(list(set(to_fetch.values())), 12)
+    pending = _pending_links()
+    for retry in range(max_retries):
+        if not pending:
+            break
+        try:
+            html_map = await http_fetch_multi(
+                list(set(pending.values())),
+                timeout,
+                attempts,
+            )
+        except Exception as exc:
+            logger.warning(
+                'Zoneurs link resolution attempt %s failed: %s',
+                retry + 1,
+                type(exc).__name__,
+            )
+            html_map = {}
 
-    for idx, z_url in to_fetch.items():
-        html = html_map.get(z_url)
-        if not html:
-            continue
+        for idx, z_url in pending.items():
+            html = html_map.get(z_url)
+            if not html:
+                continue
 
-        real = ''
-        m = re.search(r'class=["\']result-input["\'][^>]*value=["\'](https?://[^"\']+)["\']', html, re.I)
-        if m:
-            real = hd(m.group(1))
-        if not real:
-            m2 = re.search(r'<a[^>]+href=["\'](https?://[^"\']+)["\'][^>]*class=["\'][^"\']*btn-action[^"\']*btn-success', html, re.I)
-            if m2:
-                real = hd(m2.group(1))
-        if not real:
-            all_a = re.findall(r'<a[^>]+href=["\'](https?://[^"\']+)["\']', html, re.I)
-            for a_href in all_a:
-                hl = a_href.lower()
-                if 'zoneurs' in hl or 'zone-telechargement' in hl:
-                    continue
-                if re.search(r'\.(?:css|js|png|jpe?g|gif|svg|ico|woff2?)(?:\?|$)', hl, re.I):
-                    continue
-                real = hd(a_href)
-                break
+            real = ''
+            m = re.search(
+                r'class=["\']result-input["\'][^>]*value=["\'](https?://[^"\']+)["\']',
+                html,
+                re.I,
+            )
+            if m:
+                real = hd(m.group(1))
+            if not real:
+                m2 = re.search(
+                    r'<a[^>]+href=["\'](https?://[^"\']+)["\'][^>]*class=["\'][^"\']*btn-action[^"\']*btn-success',
+                    html,
+                    re.I,
+                )
+                if m2:
+                    real = hd(m2.group(1))
+            if not real:
+                all_a = re.findall(
+                    r'<a[^>]+href=["\'](https?://[^"\']+)["\']',
+                    html,
+                    re.I,
+                )
+                for a_href in all_a:
+                    hl = a_href.lower()
+                    if 'zoneurs' in hl or 'zone-telechargement' in hl:
+                        continue
+                    if re.search(
+                        r'\.(?:css|js|png|jpe?g|gif|svg|ico|woff2?)(?:\?|$)',
+                        hl,
+                        re.I,
+                    ):
+                        continue
+                    real = hd(a_href)
+                    break
 
-        if not real:
-            continue
+            if not real:
+                continue
 
-        links[idx]['url'] = real
-        rlow = real.lower()
-        new_host = ''
-        for pat, label in HOST_PATTERNS.items():
-            if pat in rlow:
-                new_host = label
-                break
-        if not new_host:
-            parsed = urlparse(real)
-            if parsed.hostname:
-                h = re.sub(r'^(?:www\d*|dl\d*|cdn\d*|files?\d*)\.', '', parsed.hostname.lower())
-                parts = h.split('.')
-                new_host = parts[0].capitalize() if parts else ''
-        if new_host:
-            links[idx]['host'] = new_host
-        links[idx]['protection'] = ''
+            links[idx]['url'] = real
+            rlow = real.lower()
+            new_host = ''
+            for pat, label in HOST_PATTERNS.items():
+                if pat in rlow:
+                    new_host = label
+                    break
+            if not new_host:
+                parsed = urlparse(real)
+                if parsed.hostname:
+                    h = re.sub(
+                        r'^(?:www\d*|dl\d*|cdn\d*|files?\d*)\.',
+                        '',
+                        parsed.hostname.lower(),
+                    )
+                    parts = h.split('.')
+                    new_host = parts[0].capitalize() if parts else ''
+            if new_host:
+                links[idx]['host'] = new_host
+            links[idx]['protection'] = ''
+
+        pending = _pending_links()
+        if pending and retry < max_retries - 1:
+            await asyncio.sleep(min(0.5 * (2 ** retry), 2.0))
 
     return links
 
 
 # Search (DataLife Engine POST search) — fetch 2 pages in parallel for more results
-async def zt_search(query: str, type_: str = 'movie') -> list:
+async def zt_search(
+    query: str,
+    type_: str = 'movie',
+    page_count: int = 2,
+    timeout: int = 20,
+    attempts: int = 8,
+) -> list:
     url = BASE_URL.rstrip('/') + '/index.php?do=search'
 
     async def _page(start: int) -> list:
@@ -805,10 +1029,12 @@ async def zt_search(query: str, type_: str = 'movie') -> list:
             'search_start': str(start), 'full_search': '0',
             'result_from': str(start * 10 + 1),
         }
-        html = await fetcher.fetch_post(url, data)
+        html = await fetcher.fetch_post(url, data, timeout=timeout, attempts=attempts)
         return scrape_listing(html or '', BASE_URL)
 
-    pages = await asyncio.gather(_page(0), _page(1))
+    pages = await asyncio.gather(
+        *[_page(start) for start in range(max(1, page_count))]
+    )
     seen: set = set()
     merged: list = []
     for page in pages:
@@ -820,11 +1046,41 @@ async def zt_search(query: str, type_: str = 'movie') -> list:
 
 
 # Merge qualities from detail pages
-async def merge_qualities(page_urls: list, is_serie: bool = False) -> dict:
+async def _merge_qualities_uncached(
+    page_urls: list,
+    is_serie: bool = False,
+    timeout: int = FETCH_TIMEOUT,
+    attempts: int = 8,
+    resolve_protected: bool = True,
+) -> dict:
     if not page_urls:
         return {'meta': {}, 'qualities': []}
 
-    html_map = await http_fetch_multi(page_urls)
+    html_map: Dict[str, Optional[str]] = {}
+    pending_urls = list(dict.fromkeys(page_urls))
+    for retry in range(3):
+        if not pending_urls:
+            break
+        try:
+            fetched = await http_fetch_multi(pending_urls, timeout, attempts)
+        except Exception as exc:
+            logger.warning(
+                'Detail-page fetch attempt %s failed: %s',
+                retry + 1,
+                type(exc).__name__,
+            )
+            fetched = {}
+        html_map.update({
+            url: html
+            for url, html in fetched.items()
+            if html
+        })
+        pending_urls = [
+            url for url in pending_urls
+            if not html_map.get(url)
+        ]
+        if pending_urls and retry < 2:
+            await asyncio.sleep(min(0.5 * (2 ** retry), 2.0))
 
     all_download = []
     all_stream = []
@@ -861,10 +1117,20 @@ async def merge_qualities(page_urls: list, is_serie: bool = False) -> dict:
         qualities_map[q_key]['downloadLinks'].extend(detail.get('downloadLinks', []))
         qualities_map[q_key]['streamLinks'].extend(detail.get('streamLinks', []))
 
-    # Resolve zoneurs links
-    for qk, qv in qualities_map.items():
-        qv['downloadLinks'] = await resolve_zoneurs_batch(qv['downloadLinks'])
-        qv['streamLinks'] = await resolve_zoneurs_batch(qv['streamLinks'])
+    # Resolve all protected links in one batch so groups do not serialize
+    # dozens of link lookups.
+    if resolve_protected:
+        links_to_resolve = [
+            link
+            for quality in qualities_map.values()
+            for key in ('downloadLinks', 'streamLinks')
+            for link in quality[key]
+        ]
+        await resolve_zoneurs_batch(
+            links_to_resolve,
+            timeout=timeout,
+            attempts=attempts,
+        )
 
     qualities = list(qualities_map.values())
 
@@ -882,7 +1148,49 @@ async def merge_qualities(page_urls: list, is_serie: bool = False) -> dict:
 
     qualities.sort(key=q_sort_key)
 
-    return {'meta': merged_meta, 'qualities': qualities}
+    return {
+        'meta': merged_meta,
+        'qualities': qualities,
+        'unfetchedPages': len(pending_urls),
+    }
+
+
+async def merge_qualities(
+    page_urls: list,
+    is_serie: bool = False,
+    timeout: int = FETCH_TIMEOUT,
+    attempts: int = 8,
+    resolve_protected: bool = True,
+) -> dict:
+    if not page_urls:
+        return {'meta': {}, 'qualities': []}
+
+    cache_key = detail_link_cache.make_key(page_urls, is_serie, resolve_protected)
+    cached_result = detail_link_cache.get(cache_key)
+    if cached_result is not None:
+        logger.info('Detail-link cache hit for %s page(s)', len(page_urls))
+        return cached_result
+
+    async with detail_link_cache.lock_for(cache_key):
+        cached_result = detail_link_cache.get(cache_key)
+        if cached_result is not None:
+            logger.info('Detail-link cache hit for %s page(s)', len(page_urls))
+            return cached_result
+
+        result = await _merge_qualities_uncached(
+            page_urls,
+            is_serie=is_serie,
+            timeout=timeout,
+            attempts=attempts,
+            resolve_protected=resolve_protected,
+        )
+        has_links = any(
+            quality.get('downloadLinks') or quality.get('streamLinks')
+            for quality in result.get('qualities', [])
+        )
+        if has_links:
+            detail_link_cache.save(cache_key, result)
+        return result
 
 
 # Group results
@@ -984,6 +1292,34 @@ async def search(
     items = await zt_search(q, type)
     items = filter_by_category(items, type)
     results = group_results(items)
+    query_year = extract_year(q) or None
+    for result in results:
+        result['_searchScore'] = _tmdb_result_score(result, [q], query_year)
+
+    # Search pages can omit a current exact title while returning older
+    # partial-title matches. Backfill only relevant entries from this type's
+    # recent catalog, then rank exact matches ahead of those partial matches.
+    if not results or max(result.get('_searchScore', 0) for result in results) < 60:
+        latest = await get_latest(type=normalize_type_alias(type), limit=48)
+        known_pages = {
+            page_url
+            for result in results
+            for page_url in result.get('pageUrls', [])
+        }
+        for result in latest.get('results', []):
+            score = _tmdb_result_score(result, [q], query_year)
+            if score < 45:
+                continue
+            page_urls = result.get('pageUrls', [])
+            if not page_urls or all(page_url in known_pages for page_url in page_urls):
+                continue
+            result['_searchScore'] = score
+            results.append(result)
+            known_pages.update(page_urls)
+
+    results.sort(key=lambda result: result.get('_searchScore', 0), reverse=True)
+    for result in results:
+        result.pop('_searchScore', None)
 
     last = fetcher.last_status
     return {
@@ -1053,7 +1389,13 @@ def _mask(v: str) -> str:
 
 
 def _check_admin(key: Optional[str]):
-    if key != os.environ['ADMIN_KEY']:
+    expected = os.environ.get('ADMIN_KEY', '').strip()
+    if not expected:
+        raise HTTPException(
+            status_code=503,
+            detail='Configuration administrateur indisponible : définissez ADMIN_KEY dans les secrets du projet.',
+        )
+    if not key or not compare_digest(key, expected):
         raise HTTPException(status_code=401, detail='Clé admin invalide')
 
 
@@ -1073,31 +1415,13 @@ async def write_settings(body: SettingsIn, x_admin_key: Optional[str] = Header(N
 
 @api_router.get("/status")
 async def status():
+    import proxy_manager
     s = await fetcher.get_settings()
     return {
         'relays': [{'url': r['url'], 'key': _mask(r.get('key', ''))} for r in s['relays']],
         'scraperapi': bool(s['scraperapi_key']),
         'direct': s['direct'],
-        'proxyPool': {'pool': 0, 'last_refill': 0, 'last_refill_found': 0, 'validations': 0},
-        'originAccount': 'configured' if (
-            os.getenv('ZT_ORIGIN_USERNAME') and os.getenv('ZT_ORIGIN_PASSWORD')
-        ) else 'missing',
-        'environment': {
-            'backendUrl': _mask(os.getenv('BACKEND_URL', '')),
-            'relayOrigin': _mask(os.getenv('RELAY_ORIGIN', '')),
-            'tmdbApiKey': _mask(os.getenv('TMDB_API_KEY_2') or os.getenv('TMDB_API_KEY', '')),
-            'adminKey': 'configured' if os.getenv('ADMIN_KEY') else 'missing',
-            'variables': [
-                {
-                    'name': name,
-                    'configured': bool(value),
-                    'value': _mask(value) if any(token in name.upper() for token in ('KEY', 'SECRET', 'TOKEN', 'PASSWORD')) else value,
-                    'editable': False,
-                }
-                for name, value in sorted(os.environ.items())
-                if name.upper().startswith(('RELAY_', 'BACKEND_', 'TMDB_', 'SCRAPERAPI_', 'ADMIN_', 'REACT_APP_'))
-            ],
-        },
+        'proxyPool': proxy_manager.stats,
         'last': fetcher.last_status,
     }
 
@@ -1110,15 +1434,21 @@ async def status_test(x_admin_key: Optional[str] = Header(None)):
 
 @api_router.get("/img")
 async def image_proxy(u: str):
+    import proxy_manager as pm
     from fastapi.responses import Response
-    low = u.lower()
-    if not (low.startswith('http') and ('zone-telechargement' in low or 'zone-images' in low)):
+    parsed = urlparse(u)
+    host = (parsed.hostname or '').lower().rstrip('.')
+    allowed_hosts = ('zone-telechargement.org', 'zone-images.com')
+    if (
+        parsed.scheme not in ('http', 'https')
+        or not any(host == domain or host.endswith('.' + domain) for domain in allowed_hosts)
+    ):
         raise HTTPException(status_code=400, detail='host non autorisé')
     hit = _img_cache.get(u)
     if hit and time.time() - hit[0] < 86400:
         return Response(content=hit[1], media_type=hit[2],
                         headers={'Cache-Control': 'public, max-age=86400'})
-    status, content, ctype, _source = await fetcher.fetch_bytes(u, 15)
+    status, content, ctype, proxy = await pm.fetch_bytes(u, 15)
     if status == 200 and content:
         if len(_img_cache) > 400:
             _img_cache.clear()
@@ -1141,8 +1471,8 @@ async def relay_file(name: str):
 TMDB_BASE = 'https://api.themoviedb.org/3'
 
 
-async def get_tmdb_title(tmdb_id: int, media_type: str = 'movie') -> Optional[str]:
-    """Resolve a TMDB ID to its title. Returns None if TMDB_API_KEY not configured."""
+async def get_tmdb_metadata(tmdb_id: int, media_type: str = 'movie') -> Optional[Dict[str, Any]]:
+    """Resolve title aliases, year and poster for a TMDB ID."""
     key = os.environ.get('TMDB_API_KEY', '').strip()
     if not key:
         return None
@@ -1156,54 +1486,423 @@ async def get_tmdb_title(tmdb_id: int, media_type: str = 'movie') -> Optional[st
             if r.status_code != 200:
                 return None
             data = r.json()
-            return (data.get('title') or data.get('name') or
-                    data.get('original_title') or data.get('original_name'))
+            title = (
+                data.get('title') or data.get('name') or
+                data.get('original_title') or data.get('original_name')
+            )
+            original_title = data.get('original_title') or data.get('original_name')
+            date = data.get('release_date') or data.get('first_air_date') or ''
+            poster_path = data.get('poster_path') or ''
+            return {
+                'title': title,
+                'original_title': original_title,
+                'year': date[:4] or None,
+                'poster': (
+                    f'https://image.tmdb.org/t/p/w500{poster_path}'
+                    if poster_path else None
+                ),
+            }
     except Exception:
         return None
 
 
-async def _liens_by_tmdb(tmdb_id: int, media_type: str, title: Optional[str]) -> dict:
-    """Search zone-telechargement for a TMDB ID and return a flat list of links."""
-    if not title:
-        title = await get_tmdb_title(tmdb_id, media_type)
+async def get_tmdb_title(tmdb_id: int, media_type: str = 'movie') -> Optional[str]:
+    """Compatibility wrapper for callers needing only the localized title."""
+    metadata = await get_tmdb_metadata(tmdb_id, media_type)
+    return metadata.get('title') if metadata else None
+
+
+def _match_title(value: str) -> str:
+    normalized = clean_title(value).lower()
+    normalized = re.sub(r'\b(?:19|20)\d{2}\b', ' ', normalized)
+    return re.sub(r'[^a-z0-9]+', ' ', normalized).strip()
+
+
+def _tmdb_result_score(result: dict, title_aliases: List[str], year: Optional[str]) -> float:
+    candidate = _match_title(result.get('title') or '')
+    if not candidate:
+        return 0
+
+    score = 0.0
+    for alias in title_aliases:
+        target = _match_title(alias)
+        if not target:
+            continue
+        if candidate == target:
+            alias_score = 100.0
+        elif target in candidate or candidate in target:
+            alias_score = max(0.0, 58.0 - abs(len(candidate) - len(target)))
+        else:
+            alias_score = SequenceMatcher(None, target, candidate).ratio() * 60.0
+        score = max(score, alias_score)
+
+    result_year = str(result.get('year') or extract_year(result.get('title') or '') or '')
+    if year:
+        if result_year == str(year):
+            score += 40
+        elif result_year:
+            score -= 45
+    return score
+
+
+async def _liens_by_tmdb(
+    tmdb_id: int,
+    media_type: str,
+    title: Optional[str],
+    season: Optional[int] = None,
+    episode: Optional[int] = None,
+) -> dict:
+    """Search the catalog by TMDB ID and optionally filter a TV season or episode."""
+    if tmdb_id < 1:
+        raise HTTPException(status_code=422, detail='tmdb_id doit être positif')
+    if season is not None and season < 1:
+        raise HTTPException(status_code=422, detail='season doit être positif')
+    if episode is not None and episode < 1:
+        raise HTTPException(status_code=422, detail='episode doit être positif')
+    if episode is not None and season is None:
+        raise HTTPException(status_code=422, detail='season est obligatoire avec episode')
+
+    requested_year = extract_year(title or '') or None
+    metadata = await get_tmdb_metadata(tmdb_id, media_type)
+    if not title and metadata:
+        title = metadata.get('title')
     if not title:
         return {
             'tmdb_id': tmdb_id,
+            'media_type': 'movie' if media_type in ('film', 'movie') else 'series',
+            'season': season,
+            'episode': episode,
+            'total': 0,
             'error': (
-                'Clé TMDB non configurée. '
-                'Ajoutez TMDB_API_KEY dans backend/.env ou passez ?title=Le+Titre'
+                'TMDB_API_KEY est nécessaire pour résoudre cet ID automatiquement. '
+                'Configurez cette clé dans Replit Secrets ou passez ?title=Le+Titre.'
             ),
             'links': [],
+            'qualities': [],
+            'total_qualities': 0,
         }
+    title = re.sub(
+        r'[\s(,–-]*\b(?:19|20)\d{2}\b\s*[)]?\s*$',
+        '',
+        title,
+    ).strip(' -–(),')
 
-    type_map = {'film': 'movie', 'serie': 'tv', 'movie': 'movie', 'tv': 'tv'}
+    type_map = {
+        'film': 'movie', 'movie': 'movie',
+        'serie': 'tv', 'series': 'tv', 'tv': 'tv',
+    }
     type_ = type_map.get(media_type, 'movie')
 
-    items = await zt_search(title, type_)
+    title_aliases = [title]
+    if metadata:
+        title_aliases.extend([
+            metadata.get('title') or '',
+            metadata.get('original_title') or '',
+        ])
+    title_aliases = list(dict.fromkeys(alias.strip() for alias in title_aliases if alias.strip()))
+    year = (metadata.get('year') if metadata else None) or requested_year
+    poster = metadata.get('poster') if metadata else None
+
+    queries: List[str] = []
+    for alias in title_aliases:
+        if season is not None and episode is not None:
+            queries.append(f'{alias} S{season:02d}E{episode:02d}')
+        elif season is not None:
+            queries.append(f'{alias} saison {season}')
+        elif year:
+            queries.append(f'{alias} {year}')
+        else:
+            queries.append(alias)
+    queries = list(dict.fromkeys(query.strip() for query in queries if query.strip()))[:2]
+
+    async def _bounded_search(query: str) -> list:
+        try:
+            return await asyncio.wait_for(
+                zt_search(query, type_, page_count=1, timeout=6, attempts=2),
+                timeout=8,
+            )
+        except Exception as exc:
+            logger.warning('TMDB catalogue search failed: %s', type(exc).__name__)
+            return []
+
+    search_batches = await asyncio.gather(*[_bounded_search(query) for query in queries])
+    items = []
+    seen_pages = set()
+    for batch in search_batches:
+        for item in filter_by_category(batch, type_):
+            page_url = item.get('pageUrl')
+            if page_url and page_url not in seen_pages:
+                seen_pages.add(page_url)
+                items.append(item)
     results = group_results(items)
+    year_conflicts = 0
+    if year:
+        filtered_results = []
+        for result in results:
+            result_year = str(result.get('year') or extract_year(result.get('title') or ''))
+            if result_year and result_year != str(year):
+                year_conflicts += 1
+                continue
+            filtered_results.append(result)
+        results = filtered_results
+
+    # Some source-site search forms ignore an appended year. Retry by title only
+    # if the year-targeted search returned no candidate; the release-year checks
+    # below still prevent an older installment from being returned.
+    if year and not results:
+        fallback_batches = await asyncio.gather(
+            *[_bounded_search(alias) for alias in title_aliases[:2]]
+        )
+        for batch in fallback_batches:
+            for item in filter_by_category(batch, type_):
+                page_url = item.get('pageUrl')
+                if page_url and page_url not in seen_pages:
+                    seen_pages.add(page_url)
+                    items.append(item)
+        results = group_results(items)
+        year_conflicts = 0
+        filtered_results = []
+        for result in results:
+            result_year = str(result.get('year') or extract_year(result.get('title') or ''))
+            if result_year and result_year != str(year):
+                year_conflicts += 1
+                continue
+            filtered_results.append(result)
+        results = filtered_results
+
+    for result in results:
+        result['_matchScore'] = _tmdb_result_score(result, title_aliases, year)
+    results.sort(key=lambda result: result.get('_matchScore', 0), reverse=True)
+
+    # The site's full-text search can return only partial-title matches while
+    # the exact item is already present in its recent catalog (e.g. Animals).
+    # Fall back only when text search did not produce a confident title match.
+    if not year and (not results or results[0].get('_matchScore', 0) < 60):
+        try:
+            latest = await asyncio.wait_for(
+                get_latest(type=type_, limit=48),
+                timeout=8,
+            )
+        except Exception:
+            latest = {'results': []}
+        latest_results = latest.get('results', [])
+        known_pages = {
+            page_url
+            for result in results
+            for page_url in result.get('pageUrls', [])
+        }
+        for result in latest_results:
+            page_urls = result.get('pageUrls', [])
+            if not page_urls or all(page_url in known_pages for page_url in page_urls):
+                continue
+            results.append(result)
+            known_pages.update(page_urls)
+        for result in results:
+            result['_matchScore'] = _tmdb_result_score(result, title_aliases, year)
+        results.sort(key=lambda result: result.get('_matchScore', 0), reverse=True)
 
     if not results:
-        return {'tmdb_id': tmdb_id, 'title': title, 'total': 0, 'links': []}
+        response = {
+            'tmdb_id': tmdb_id,
+            'media_type': 'movie' if type_ == 'movie' else 'series',
+            'title': title,
+            'year': year,
+            'poster': poster,
+            'season': season,
+            'episode': episode,
+            'total': 0,
+            'links': [],
+            'qualities': [],
+            'total_qualities': 0,
+        }
+        if year:
+            response['error'] = (
+                f'Aucun résultat du catalogue ne correspond à {title} ({year}).'
+            )
+        return response
 
-    best = results[0]
+    if results[0].get('_matchScore', 0) < 60:
+        return {
+            'tmdb_id': tmdb_id,
+            'media_type': 'movie' if type_ == 'movie' else 'series',
+            'title': title,
+            'year': year,
+            'poster': poster,
+            'season': season,
+            'episode': episode,
+            'total': 0,
+            'links': [],
+            'qualities': [],
+            'total_qualities': 0,
+            'error': 'Aucun résultat assez proche du titre TMDB et de son année.',
+        }
+
     is_serie = type_ in ('tv', 'anime')
-    merged = await merge_qualities(best['pageUrls'][:3], is_serie)
-
+    best = results[0]
+    merged: dict = {'meta': {}, 'qualities': []}
     all_links: List[Dict[str, Any]] = []
-    for q in merged.get('qualities', []):
-        for lk in q.get('downloadLinks', []):
-            all_links.append({**lk, 'quality': q['quality'], 'lang': q['lang'], 'type': 'download'})
-        for lk in q.get('streamLinks', []):
-            all_links.append({**lk, 'quality': q['quality'], 'lang': q['lang'], 'type': 'stream'})
+    all_qualities: List[Dict[str, Any]] = []
+    unresolved_protected_count = 0
 
-    return {
+    # Specific season/episode lookups may have several similarly titled pages.
+    # Try a few candidates until one contains links matching the requested scope.
+    candidates = results[:3] if season is not None else results[:2]
+    for candidate in candidates:
+        detail_pages = candidate['pageUrls'][:10]
+        detail_retry = 0
+        while True:
+            try:
+                candidate_merged = await merge_qualities(
+                    detail_pages,
+                    is_serie,
+                    timeout=6,
+                    attempts=1,
+                    resolve_protected=False,
+                )
+            except Exception as exc:
+                logger.warning(
+                    'TMDB detail fetch failed; retrying: %s',
+                    type(exc).__name__,
+                )
+                candidate_merged = {
+                    'meta': {},
+                    'qualities': [],
+                    'unfetchedPages': len(detail_pages),
+                }
+
+            if not candidate_merged.get('unfetchedPages'):
+                break
+
+            detail_retry += 1
+            delay = min(1.0 * (2 ** min(detail_retry - 1, 4)), 15.0)
+            logger.info(
+                'TMDB detail pages still pending: %s; retry %s in %.1fs',
+                candidate_merged['unfetchedPages'],
+                detail_retry,
+                delay,
+            )
+            await asyncio.sleep(delay)
+
+        meta = candidate_merged.get('meta', {})
+        detail_year = extract_year(' '.join(
+            str(meta.get(key) or '')
+            for key in ('title', 'release', 'releaseName')
+        ))
+        if type_ == 'movie' and year and detail_year and detail_year != str(year):
+            year_conflicts += 1
+            continue
+
+        candidate_links: List[Dict[str, Any]] = []
+        candidate_qualities: List[Dict[str, Any]] = []
+        for quality in candidate_merged.get('qualities', []):
+            quality_name = quality.get('quality') or 'Inconnu'
+            quality_lang = quality.get('lang', '')
+            grouped_quality = {
+                **quality,
+                'quality': quality_name,
+                'lang': quality_lang,
+                'downloadLinks': [],
+                'streamLinks': [],
+            }
+            for link_type, key in (('download', 'downloadLinks'), ('stream', 'streamLinks')):
+                for link in quality.get(key, []):
+                    link_season = link.get('season')
+                    link_episode = link.get('episode')
+                    if season is not None and link_season != season:
+                        continue
+                    if episode is not None and link_episode != episode:
+                        continue
+                    link_year = extract_year(' '.join(
+                        str(link.get(field) or '')
+                        for field in ('release', 'releaseName', 'filename')
+                    ))
+                    if type_ == 'movie' and year and link_year and link_year != str(year):
+                        year_conflicts += 1
+                        continue
+                    hoster = link.get('host') or extract_host_and_protection(
+                        link.get('realUrl') or link.get('url', '')
+                    ).get('host', '')
+                    normalized_link = {
+                        **link,
+                        'host': hoster,
+                        'hoster': hoster,
+                        'quality': quality_name,
+                        'lang': quality_lang,
+                        'type': link_type,
+                    }
+                    candidate_links.append(normalized_link)
+                    grouped_quality[key].append(normalized_link)
+            if grouped_quality['downloadLinks'] or grouped_quality['streamLinks']:
+                candidate_qualities.append(grouped_quality)
+
+        # Return the resolved hosting destination when possible. Keep and flag
+        # any Zoneurs links that remain unresolved after automatic retries.
+        try:
+            await resolve_zoneurs_batch(
+                candidate_links,
+                timeout=6,
+                attempts=1,
+                max_retries=3,
+            )
+        except Exception as exc:
+            logger.warning('TMDB protected-link resolution failed: %s', type(exc).__name__)
+
+        unresolved_protected_count = sum(
+            1
+            for link in candidate_links
+            if re.match(
+                r'^https?://(?:www\.)?zoneurs\.net/',
+                str(link.get('url') or ''),
+                re.I,
+            )
+        )
+
+        if candidate_links:
+            best = candidate
+            merged = candidate_merged
+            all_links = candidate_links
+            all_qualities = candidate_qualities
+            break
+        if not merged.get('meta') and candidate_merged.get('meta'):
+            best = candidate
+            merged = candidate_merged
+
+    response = {
         'tmdb_id': tmdb_id,
-        'title': merged.get('meta', {}).get('title') or title,
-        'poster': merged.get('meta', {}).get('poster'),
-        'result_url': best['pageUrls'][0] if best.get('pageUrls') else None,
+        'media_type': 'movie' if type_ == 'movie' else 'series',
+        'title': title,
+        'matched_title': merged.get('meta', {}).get('title') or best.get('title'),
+        'year': year or best.get('year'),
+        'poster': poster or merged.get('meta', {}).get('poster'),
+        'result_url': (
+            best['pageUrls'][0]
+            if best.get('pageUrls') and (all_links or not year_conflicts)
+            else None
+        ),
+        'season': season,
+        'episode': episode,
         'total': len(all_links),
+        'total_qualities': len(all_qualities),
+        'unresolved_protected_links': unresolved_protected_count,
         'links': all_links,
+        'qualities': all_qualities,
     }
+    if not all_links and unresolved_protected_count:
+        response['error'] = (
+            f'{unresolved_protected_count} lien(s) Zoneurs n’ont pas pu être '
+            'résolus en adresse directe.'
+        )
+    elif not all_links and year_conflicts and year:
+        response['error'] = (
+            f'Les liens trouvés ne correspondent pas à l’année TMDB {year}; '
+            'ils ont été écartés pour éviter un mauvais résultat.'
+        )
+    elif unresolved_protected_count:
+        response['warning'] = (
+            f'{unresolved_protected_count} lien(s) restent protégés après 3 tentatives '
+            'automatiques; ils sont affichés avec leur protection.'
+        )
+    return response
 
 
 # ── Latest additions ───────────────────────────────────────
@@ -1250,10 +1949,7 @@ async def get_latest(type: str = Query('movie'), limit: int = Query(24, le=48)):
 
     items = scrape_listing(html, BASE_URL)
     # Filter by category BEFORE grouping (raw items have 'pageUrl')
-    if t != 'movie' or len(paths) > 1:
-        filtered = filter_by_category(items, t)
-        if filtered:
-            items = filtered
+    items = filter_by_category(items, t)
     results = group_results(items)
     subset = results[:limit]
     return {'type': type, 'total': len(subset), 'results': subset}
@@ -1271,7 +1967,50 @@ async def liens_serie(tmdb_id: int, title: Optional[str] = None):
     return await _liens_by_tmdb(tmdb_id, 'serie', title)
 
 
+@api_router.get("/liens")
+async def liens(
+    media_type: str = Query(..., pattern='^(film|serie)$'),
+    tmdb_id: int = Query(..., ge=1),
+    title: Optional[str] = None,
+):
+    return await _liens_by_tmdb(tmdb_id, media_type, title)
+
+
+@liens_router.get("/liens/movie/{tmdb_id}")
+async def liens_movie(tmdb_id: int, title: Optional[str] = None):
+    return await _liens_by_tmdb(tmdb_id, 'movie', title)
+
+
+@liens_router.get("/liens/series/{tmdb_id}")
+async def liens_series(tmdb_id: int, title: Optional[str] = None):
+    return await _liens_by_tmdb(tmdb_id, 'series', title)
+
+
+@liens_router.get("/liens/series/{tmdb_id}/{season}")
+async def liens_series_season(tmdb_id: int, season: int, title: Optional[str] = None):
+    return await _liens_by_tmdb(tmdb_id, 'series', title, season=season)
+
+
+@liens_router.get("/liens/series/{tmdb_id}/{season}/{episode}")
+async def liens_series_episode(
+    tmdb_id: int,
+    season: int,
+    episode: int,
+    title: Optional[str] = None,
+):
+    return await _liens_by_tmdb(tmdb_id, 'series', title, season=season, episode=episode)
+
+
+api_router.include_router(liens_router)
+
+
 app.include_router(api_router)
+app.include_router(liens_router)
+# The artifact router preserves its configured path prefix when proxying.
+# Keep the local /api routes too, while exposing the same endpoints through
+# the app's /zt-api service path.
+app.include_router(api_router, prefix="/zt-api")
+app.include_router(liens_router, prefix="/zt-api")
 
 
 app.add_middleware(
@@ -1286,4 +2025,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+# HTTPX logs request URLs at INFO; TMDB's v3 key is a query parameter, so
+# suppress these lines to prevent credentials from being written to service logs.
+logging.getLogger('httpx').setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)

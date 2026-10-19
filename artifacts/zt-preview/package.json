@@ -4,9 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "next dev --hostname 0.0.0.0 --port $PORT",
-    "build": "next build",
-    "start": "next start --hostname 0.0.0.0 --port $PORT",
+    "dev": "vite --config vite.config.ts --host 0.0.0.0",
+    "build": "vite build --config vite.config.ts",
+    "serve": "vite preview --config vite.config.ts --host 0.0.0.0",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {
@@ -73,12 +73,5 @@
     "vite": "catalog:",
     "wouter": "^3.3.5",
     "zod": "catalog:"
-  },
-  "dependencies": {
-    "@base-ui/react": "1.5.0",
-    "@tailwindcss/postcss": "4.3.3",
-    "@vercel/analytics": "1.6.1",
-    "next": "16.4.0",
-    "shadcn": "4.11.0"
   }
 }
