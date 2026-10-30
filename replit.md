@@ -1,45 +1,33 @@
-# [Project name]
+# ZT Search
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+ZT Search provides a French-language interface for searching the configured content catalogue and viewing available source links.
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
-- `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- Use the `artifacts/zt-preview: web` workflow for the React/Vite interface.
+- Use the `artifacts/zt-preview: search-api` workflow for the FastAPI search backend.
+- The `artifacts/api-server: API Server` workflow is a separate workspace service and is not used by the ZT Search interface.
+- Run `pnpm install --frozen-lockfile` to install the workspace dependencies.
+- Run `pnpm run typecheck` to check the TypeScript workspace.
+- Python dependencies and the supported Python version are defined in `pyproject.toml` and `uv.lock`.
 
-## Stack
+## Required Secrets
 
-- pnpm workspaces, Node.js 24, TypeScript 5.9
-- API: Express 5
-- DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
-- API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
+- `ZT_ORIGIN_USERNAME` and `ZT_ORIGIN_PASSWORD` configure the direct source-site account.
+- `ADMIN_KEY` protects source settings and the network diagnostics panel.
+- `TMDB_API_KEY` enables TMDB-backed metadata.
+- Keep credentials in Replit Secrets. Do not paste credentials into source files or send authenticated session cookies through relays.
 
-## Where things live
+## Project Map
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `artifacts/zt-preview/src/` — React/Vite interface, search views, source settings, and network diagnostics.
+- `artifacts/zt-preview/backend/` — FastAPI search service, source fetching, relay management, and local state.
+- `lib/api-spec/openapi.yaml` — API contract source; regenerate clients with `pnpm --filter @workspace/api-spec run codegen`.
+- `artifacts/zt-preview/.replit-artifact/artifact.toml` — web and search API service routing.
 
-## Architecture decisions
+## Operations
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
-
-## Product
-
-_Describe the high-level user-facing capabilities of this app once they exist._
-
-## User preferences
-
-_Populate as you build — explicit user instructions worth remembering across sessions._
-
-## Gotchas
-
-_Populate as you build — sharp edges, "always run X before Y" rules._
-
-## Pointers
-
-- See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details
+- The **Réseau** panel next to **Sources** shows administrator-only server, tunnel, relay, and outbound-IP diagnostics.
+- The outbound IP is checked through api.ipify.org when an administrator opens the diagnostics panel and while it remains open.
+- Relay credentials, URL paths, query parameters, and the last proxy URL must not be exposed in public status responses or the diagnostics UI.
+- Search configuration and proxy-pool state are stored by the backend in its local SQLite state file.

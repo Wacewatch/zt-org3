@@ -207,6 +207,56 @@ export const GetSourceStatusResponse = zod.object({
 
 
 /**
+ * @summary Read protected network diagnostics
+ */
+export const GetNetworkDiagnosticsHeader = zod.object({
+  "X-Admin-Key": zod.string()
+})
+
+export const GetNetworkDiagnosticsResponse = zod.object({
+  "checkedAt": zod.number(),
+  "outboundIp": zod.string().nullable(),
+  "tunnel": zod.object({
+  "platform": zod.string(),
+  "host": zod.string().nullable(),
+  "protocol": zod.string().nullable(),
+  "apiPath": zod.string()
+}),
+  "runtime": zod.object({
+  "service": zod.string(),
+  "python": zod.string(),
+  "uptimeSeconds": zod.number()
+}),
+  "source": zod.object({
+  "origin": zod.string(),
+  "directEnabled": zod.boolean(),
+  "accountConfigured": zod.boolean(),
+  "accountAuthenticated": zod.boolean(),
+  "scraperApiConfigured": zod.boolean(),
+  "tmdbConfigured": zod.boolean()
+}),
+  "relays": zod.array(zod.object({
+  "scheme": zod.string(),
+  "host": zod.string(),
+  "port": zod.number().int().nullable(),
+  "keyConfigured": zod.boolean()
+})),
+  "proxyPool": zod.object({
+  "pool": zod.number().int(),
+  "last_refill": zod.number().int(),
+  "last_refill_found": zod.number().int(),
+  "validations": zod.number().int()
+}),
+  "lastRequest": zod.object({
+  "ok": zod.boolean().nullable(),
+  "source": zod.string().nullable(),
+  "at": zod.number().nullable(),
+  "errorCount": zod.number().int()
+})
+})
+
+
+/**
  * @summary Read source settings
  */
 export const GetSourceSettingsHeader = zod.object({

@@ -28,6 +28,7 @@ import type {
   HealthStatus,
   LatestResponse,
   LinksResponse,
+  NetworkDiagnostics,
   OkResponse,
   SearchContentParams,
   SearchResponse,
@@ -620,6 +621,83 @@ export function useGetSourceStatus<TData = Awaited<ReturnType<typeof getSourceSt
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 
   const queryOptions = getGetSourceStatusQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getGetNetworkDiagnosticsUrl = () => {
+
+
+
+
+  return `/api/diagnostics`
+}
+
+/**
+ * @summary Read protected network diagnostics
+ */
+export const getNetworkDiagnostics = async ( options?: Parameters<typeof customFetch>[1]): Promise<NetworkDiagnostics> => {
+
+  return customFetch<NetworkDiagnostics>(getGetNetworkDiagnosticsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetNetworkDiagnosticsQueryKey = () => {
+    return [
+    `/api/diagnostics`
+    ] as const;
+    }
+
+
+export const getGetNetworkDiagnosticsQueryOptions = <TData = Awaited<ReturnType<typeof getNetworkDiagnostics>>, TError = ErrorType<void>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getNetworkDiagnostics>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetNetworkDiagnosticsQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getNetworkDiagnostics>>> = ({ signal }) => getNetworkDiagnostics({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getNetworkDiagnostics>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetNetworkDiagnosticsQueryResult = NonNullable<Awaited<ReturnType<typeof getNetworkDiagnostics>>>
+export type GetNetworkDiagnosticsQueryError = ErrorType<void>
+
+
+/**
+ * @summary Read protected network diagnostics
+ */
+
+export function useGetNetworkDiagnostics<TData = Awaited<ReturnType<typeof getNetworkDiagnostics>>, TError = ErrorType<void>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getNetworkDiagnostics>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetNetworkDiagnosticsQueryOptions(options)
 
   const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
 

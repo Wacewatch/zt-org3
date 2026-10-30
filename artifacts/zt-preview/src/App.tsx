@@ -4,6 +4,7 @@ import {
   Activity, ArrowLeft, BookOpen, Check, ChevronRight,
   Clapperboard, Clock3, Copy, ExternalLink, Film, Gamepad2, Headphones,
   KeyRound, Link2, LoaderCircle, MapPin, MonitorDown, Music2, Radio,
+  RadioTower,
   Search, Settings2, ShieldAlert, Sparkles, Star, Tag, Tv, UserRound, Users,
   Video, X, Zap,
 } from 'lucide-react';
@@ -21,6 +22,7 @@ import type {
 import { Route, Switch, useLocation, useParams } from 'wouter';
 import NotFound from '@/pages/not-found';
 import ApiDocsPage from './ApiDocs';
+import NetworkDiagnosticsModal from './NetworkDiagnosticsModal';
 
 setBaseUrl('/zt-api');
 
@@ -60,8 +62,8 @@ function Brand({ compact = false }: { compact?: boolean }) {
   </div>;
 }
 
-function Header({ onOpenSources, onHome, onApiDocs, category, isLookup = false }: {
-  onOpenSources?: () => void; onHome?: () => void; onApiDocs?: () => void; category?: string; isLookup?: boolean;
+function Header({ onOpenSources, onOpenDiagnostics, onHome, onApiDocs, category, isLookup = false }: {
+  onOpenSources?: () => void; onOpenDiagnostics?: () => void; onHome?: () => void; onApiDocs?: () => void; category?: string; isLookup?: boolean;
 }) {
   return <header data-testid="app-header" className="sticky top-0 z-40 border-b border-white/[.07] bg-[#0d1218]/90 backdrop-blur-2xl">
     <div className="mx-auto flex max-w-[1440px] items-center gap-4 px-4 py-3 sm:px-7">
@@ -81,6 +83,9 @@ function Header({ onOpenSources, onHome, onApiDocs, category, isLookup = false }
         </button>}
         {!isLookup && <button data-testid="open-sources-btn" onClick={onOpenSources} className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/[.035] px-3.5 py-2 text-xs font-semibold text-slate-300 transition hover:border-emerald-300/30 hover:text-emerald-200">
           <Settings2 size={14} /><span className="hidden sm:inline">Sources</span>
+        </button>}
+        {!isLookup && <button data-testid="open-network-diagnostics-btn" aria-label="Ouvrir le diagnostic réseau" title="Diagnostic réseau" onClick={onOpenDiagnostics} className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/[.035] px-3.5 py-2 text-xs font-semibold text-slate-300 transition hover:border-sky-300/30 hover:text-sky-200">
+          <RadioTower size={14} /><span className="hidden sm:inline">Réseau</span>
         </button>}
       </div>
     </div>
@@ -329,6 +334,7 @@ function MainPage() {
   const [searchCount, setSearchCount] = useState(0);
   const [selected, setSelected] = useState<ContentResult | null>(null);
   const [sourcesOpen, setSourcesOpen] = useState(false);
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const categories = useGetContentCategories();
   const availableCategories = categories.data?.categories || [];
   const normalizedType = availableCategories.some((item) => item.type === activeType) ? activeType : (availableCategories[0]?.type || activeType);
@@ -354,7 +360,7 @@ function MainPage() {
   const queryError = view === 'home' ? latest.isError : search.isError;
 
   return <div className="min-h-[100dvh]">
-    <Header category={activeCategory?.label} onApiDocs={() => navigate('/api-docs')} onOpenSources={() => setSourcesOpen(true)} onHome={() => { setView('home'); setSelected(null); }} />
+    <Header category={activeCategory?.label} onApiDocs={() => navigate('/api-docs')} onOpenSources={() => setSourcesOpen(true)} onOpenDiagnostics={() => setDiagnosticsOpen(true)} onHome={() => { setView('home'); setSelected(null); }} />
     <div className="mx-auto max-w-[1440px] px-4 sm:px-7">
       <section className="relative overflow-hidden pb-1 pt-8 sm:pt-12">
         <div className="absolute -right-16 -top-16 h-72 w-72 rounded-full border border-emerald-200/[.06] sm:right-10 sm:top-1"><div className="m-7 h-56 w-56 rounded-full border border-emerald-200/[.05]"><div className="m-7 h-42 w-42 rounded-full border border-emerald-200/[.04]" /></div></div>
@@ -404,6 +410,7 @@ function MainPage() {
       <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-white/[.06] py-5 text-[9px] text-slate-700"><span>ZT Search <span className="mx-1.5 text-slate-800">/</span> Index de recherche francophone</span><span className="font-mono-ui">CATALOGUE · {activeCategory?.label || normalizedType}</span></footer>
     </div>
     <SourceModal open={sourcesOpen} close={() => setSourcesOpen(false)} />
+    <NetworkDiagnosticsModal open={diagnosticsOpen} close={() => setDiagnosticsOpen(false)} />
   </div>;
 }
 

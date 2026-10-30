@@ -143,6 +143,24 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SourceStatus"
+  /diagnostics:
+    get:
+      operationId: getNetworkDiagnostics
+      tags: [zt-search]
+      servers:
+        - url: /zt-api
+      summary: Read protected network diagnostics
+      parameters:
+        - $ref: "#/components/parameters/AdminKey"
+      responses:
+        "200":
+          description: Network, tunnel and source diagnostics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NetworkDiagnostics"
+        "401":
+          description: Invalid administrator key
   /settings:
     get:
       operationId: getSourceSettings
@@ -375,6 +393,63 @@ components:
         proxyPool: { type: object, additionalProperties: true }
         last: { type: object, additionalProperties: true }
       required: [relays, scraperapi, direct]
+    NetworkDiagnostics:
+      type: object
+      properties:
+        checkedAt: { type: number }
+        outboundIp: { type: ["string", "null"] }
+        tunnel:
+          type: object
+          properties:
+            platform: { type: string }
+            host: { type: ["string", "null"] }
+            protocol: { type: ["string", "null"] }
+            apiPath: { type: string }
+          required: [platform, host, protocol, apiPath]
+        runtime:
+          type: object
+          properties:
+            service: { type: string }
+            python: { type: string }
+            uptimeSeconds: { type: number }
+          required: [service, python, uptimeSeconds]
+        source:
+          type: object
+          properties:
+            origin: { type: string }
+            directEnabled: { type: boolean }
+            accountConfigured: { type: boolean }
+            accountAuthenticated: { type: boolean }
+            scraperApiConfigured: { type: boolean }
+            tmdbConfigured: { type: boolean }
+          required: [origin, directEnabled, accountConfigured, accountAuthenticated, scraperApiConfigured, tmdbConfigured]
+        relays:
+          type: array
+          items:
+            type: object
+            properties:
+              scheme: { type: string }
+              host: { type: string }
+              port: { type: ["integer", "null"] }
+              keyConfigured: { type: boolean }
+            required: [scheme, host, port, keyConfigured]
+        proxyPool:
+          type: object
+          properties:
+            pool: { type: integer }
+            last_refill: { type: integer }
+            last_refill_found: { type: integer }
+            validations: { type: integer }
+          required: [pool, last_refill, last_refill_found, validations]
+        lastRequest:
+          type: object
+          properties:
+            ok: { type: ["boolean", "null"] }
+            source: { type: ["string", "null"] }
+            at: { type: ["number", "null"] }
+            errorCount: { type: integer }
+          required: [ok, source, at, errorCount]
+      required: [checkedAt, outboundIp, tunnel, runtime, source, relays, proxyPool, lastRequest]
     OkResponse:
       type: object
       properties:

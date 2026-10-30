@@ -165,6 +165,67 @@ export interface SourceStatus {
   last?: SourceStatusLast;
 }
 
+export type NetworkDiagnosticsTunnel = {
+  platform: string;
+  /** @nullable */
+  host: string | null;
+  /** @nullable */
+  protocol: string | null;
+  apiPath: string;
+};
+
+export type NetworkDiagnosticsRuntime = {
+  service: string;
+  python: string;
+  uptimeSeconds: number;
+};
+
+export type NetworkDiagnosticsSource = {
+  origin: string;
+  directEnabled: boolean;
+  accountConfigured: boolean;
+  accountAuthenticated: boolean;
+  scraperApiConfigured: boolean;
+  tmdbConfigured: boolean;
+};
+
+export type NetworkDiagnosticsRelaysItem = {
+  scheme: string;
+  host: string;
+  /** @nullable */
+  port: number | null;
+  keyConfigured: boolean;
+};
+
+export type NetworkDiagnosticsProxyPool = {
+  pool: number;
+  last_refill: number;
+  last_refill_found: number;
+  validations: number;
+};
+
+export type NetworkDiagnosticsLastRequest = {
+  /** @nullable */
+  ok: boolean | null;
+  /** @nullable */
+  source: string | null;
+  /** @nullable */
+  at: number | null;
+  errorCount: number;
+};
+
+export interface NetworkDiagnostics {
+  checkedAt: number;
+  /** @nullable */
+  outboundIp: string | null;
+  tunnel: NetworkDiagnosticsTunnel;
+  runtime: NetworkDiagnosticsRuntime;
+  source: NetworkDiagnosticsSource;
+  relays: NetworkDiagnosticsRelaysItem[];
+  proxyPool: NetworkDiagnosticsProxyPool;
+  lastRequest: NetworkDiagnosticsLastRequest;
+}
+
 export interface OkResponse {
   ok: boolean;
 }

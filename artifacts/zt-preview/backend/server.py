@@ -1,9 +1,10 @@
-from fastapi import FastAPI, APIRouter, Query
+from fastapi import FastAPI, APIRouter, Query, Request
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 import os
 import logging
 import re
+import sys
 import time
 import asyncio
 from difflib import SequenceMatcher
@@ -19,6 +20,7 @@ from pydantic import BaseModel
 from secrets import compare_digest
 
 ROOT_DIR = Path(__file__).parent
+PROCESS_STARTED_AT = time.time()
 load_dotenv(ROOT_DIR / '.env')
 import fetcher  # noqa: E402
 from link_cache import detail_link_cache  # noqa: E402
@@ -1384,10 +1386,6 @@ class SettingsIn(BaseModel):
     direct: bool = True
 
 
-def _mask(v: str) -> str:
-    return (v[:3] + '•••' + v[-2:]) if v and len(v) > 6 else ('•••' if v else '')
-
-
 def _check_admin(key: Optional[str]):
     expected = os.environ.get('ADMIN_KEY', '').strip()
     if not expected:
@@ -1397,6 +1395,46 @@ def _check_admin(key: Optional[str]):
         )
     if not key or not compare_digest(key, expected):
         raise HTTPException(status_code=401, detail='Clé admin invalide')
+
+
+def _safe_source_name(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    if value.startswith('relay:'):
+        return 'relay'
+    if value in {'direct', 'proxy', 'scraperapi', 'relay'}:
+        return value
+    return 'other'
+
+
+def _safe_relay_endpoint(url: str, key: str = '') -> Dict[str, Any]:
+    try:
+        parsed = urlparse(url)
+        return {
+            'scheme': parsed.scheme or 'https',
+            'host': parsed.hostname or 'relais configuré',
+            'port': parsed.port,
+            'keyConfigured': bool(key),
+        }
+    except ValueError:
+        return {
+            'scheme': 'inconnu',
+            'host': 'relais configuré',
+            'port': None,
+            'keyConfigured': bool(key),
+        }
+
+
+async def _lookup_outbound_ip() -> Optional[str]:
+    try:
+        async with httpx.AsyncClient(timeout=4.0, follow_redirects=False) as client:
+            response = await client.get('https://api.ipify.org')
+            if response.status_code == 200:
+                import ipaddress
+                return ipaddress.ip_address(response.text.strip()).compressed
+    except (httpx.HTTPError, ValueError):
+        pass
+    return None
 
 
 @api_router.get("/settings")
@@ -1417,12 +1455,104 @@ async def write_settings(body: SettingsIn, x_admin_key: Optional[str] = Header(N
 async def status():
     import proxy_manager
     s = await fetcher.get_settings()
+    last = fetcher.last_status
     return {
-        'relays': [{'url': r['url'], 'key': _mask(r.get('key', ''))} for r in s['relays']],
+        'relays': [
+            {
+                'url': f"Relais {i + 1} · {_safe_relay_endpoint(r['url'])['host']}",
+                'key': '',
+            }
+            for i, r in enumerate(s['relays'])
+        ],
         'scraperapi': bool(s['scraperapi_key']),
         'direct': s['direct'],
         'proxyPool': proxy_manager.stats,
-        'last': fetcher.last_status,
+        'last': {
+            'ok': last.get('ok'),
+            'source': _safe_source_name(last.get('source')),
+            'at': last.get('at'),
+            'errorCount': len(last.get('errors', [])),
+        },
+    }
+
+
+@api_router.get("/diagnostics")
+async def network_diagnostics(
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+):
+    _check_admin(x_admin_key)
+    import proxy_manager
+
+    settings = await fetcher.get_settings()
+    forwarded_host = (
+        request.headers.get('x-forwarded-host')
+        or request.headers.get('host')
+        or ''
+    ).split(',', 1)[0].strip()
+    try:
+        tunnel_host = urlparse(f'//{forwarded_host}').hostname
+        tunnel_port = urlparse(f'//{forwarded_host}').port
+    except ValueError:
+        tunnel_host = None
+        tunnel_port = None
+    if tunnel_host and tunnel_port:
+        tunnel_host = f'{tunnel_host}:{tunnel_port}'
+
+    outbound_ip = await _lookup_outbound_ip()
+
+    username = os.environ.get('ZT_ORIGIN_USERNAME', '').strip()
+    password = os.environ.get('ZT_ORIGIN_PASSWORD', '')
+    origin_session = fetcher._site_session
+    origin_authenticated = bool(
+        origin_session and fetcher._has_origin_login(origin_session)
+    )
+    last = fetcher.last_status
+    last_source = last.get('source')
+    if last_source and str(last_source).startswith('relay:'):
+        last_source = 'relay'
+    elif last_source not in {'direct', 'proxy', 'scraperapi'}:
+        last_source = None
+
+    return {
+        'checkedAt': time.time(),
+        'outboundIp': outbound_ip,
+        'tunnel': {
+            'platform': 'Replit' if os.environ.get('REPL_ID') or os.environ.get('REPLIT_DEV_DOMAIN') else 'Reverse proxy' if request.headers.get('x-forwarded-host') else 'Accès direct',
+            'host': tunnel_host,
+            'protocol': request.headers.get('x-forwarded-proto', request.url.scheme).split(',', 1)[0].strip(),
+            'apiPath': '/zt-api',
+        },
+        'runtime': {
+            'service': 'FastAPI',
+            'python': sys.version.split()[0],
+            'uptimeSeconds': max(0, time.time() - PROCESS_STARTED_AT),
+        },
+        'source': {
+            'origin': urlparse(BASE_URL).hostname or 'source configurée',
+            'directEnabled': bool(settings['direct']),
+            'accountConfigured': bool(username and password),
+            'accountAuthenticated': origin_authenticated,
+            'scraperApiConfigured': bool(settings['scraperapi_key']),
+            'tmdbConfigured': bool(os.environ.get('TMDB_API_KEY', '').strip()),
+        },
+        'relays': [
+            _safe_relay_endpoint(relay.get('url', ''), relay.get('key', ''))
+            for relay in settings['relays']
+            if relay.get('url')
+        ],
+        'proxyPool': {
+            'pool': int(proxy_manager.stats.get('pool', 0)),
+            'last_refill': int(proxy_manager.stats.get('last_refill', 0)),
+            'last_refill_found': int(proxy_manager.stats.get('last_refill_found', 0)),
+            'validations': int(proxy_manager.stats.get('validations', 0)),
+        },
+        'lastRequest': {
+            'ok': last.get('ok'),
+            'source': _safe_source_name(last_source),
+            'at': last.get('at'),
+            'errorCount': len(last.get('errors', [])),
+        },
     }
 
 
