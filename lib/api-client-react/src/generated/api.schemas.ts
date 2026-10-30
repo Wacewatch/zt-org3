@@ -226,6 +226,56 @@ export interface NetworkDiagnostics {
   lastRequest: NetworkDiagnosticsLastRequest;
 }
 
+export type NetworkDiagnosticsPublicTunnel = {
+  platform: string;
+  active: boolean;
+  /** @nullable */
+  protocol: string | null;
+  apiPath: string;
+};
+
+export type NetworkDiagnosticsPublicRuntime = {
+  service: string;
+  python: string;
+  uptimeSeconds: number;
+};
+
+export type NetworkDiagnosticsPublicSource = {
+  origin: string;
+  directEnabled: boolean;
+};
+
+export type NetworkDiagnosticsPublicRelaySummary = {
+  configured: number;
+};
+
+export type NetworkDiagnosticsPublicProxyPool = {
+  pool: number;
+  last_refill: number;
+  last_refill_found: number;
+  validations: number;
+};
+
+export type NetworkDiagnosticsPublicLastRequest = {
+  /** @nullable */
+  ok: boolean | null;
+  /** @nullable */
+  source: string | null;
+  /** @nullable */
+  at: number | null;
+  errorCount: number;
+};
+
+export interface NetworkDiagnosticsPublic {
+  checkedAt: number;
+  tunnel: NetworkDiagnosticsPublicTunnel;
+  runtime: NetworkDiagnosticsPublicRuntime;
+  source: NetworkDiagnosticsPublicSource;
+  relaySummary: NetworkDiagnosticsPublicRelaySummary;
+  proxyPool: NetworkDiagnosticsPublicProxyPool;
+  lastRequest: NetworkDiagnosticsPublicLastRequest;
+}
+
 export interface OkResponse {
   ok: boolean;
 }

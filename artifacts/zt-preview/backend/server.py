@@ -1459,7 +1459,7 @@ async def status():
     return {
         'relays': [
             {
-                'url': f"Relais {i + 1} · {_safe_relay_endpoint(r['url'])['host']}",
+                'url': f"Relais {i + 1}",
                 'key': '',
             }
             for i, r in enumerate(s['relays'])
@@ -1476,12 +1476,7 @@ async def status():
     }
 
 
-@api_router.get("/diagnostics")
-async def network_diagnostics(
-    request: Request,
-    x_admin_key: Optional[str] = Header(None),
-):
-    _check_admin(x_admin_key)
+async def _collect_network_diagnostics(request: Request, include_outbound_ip: bool):
     import proxy_manager
 
     settings = await fetcher.get_settings()
@@ -1499,7 +1494,7 @@ async def network_diagnostics(
     if tunnel_host and tunnel_port:
         tunnel_host = f'{tunnel_host}:{tunnel_port}'
 
-    outbound_ip = await _lookup_outbound_ip()
+    outbound_ip = await _lookup_outbound_ip() if include_outbound_ip else None
 
     username = os.environ.get('ZT_ORIGIN_USERNAME', '').strip()
     password = os.environ.get('ZT_ORIGIN_PASSWORD', '')
@@ -1553,6 +1548,43 @@ async def network_diagnostics(
             'at': last.get('at'),
             'errorCount': len(last.get('errors', [])),
         },
+    }
+
+
+@api_router.get("/diagnostics")
+async def network_diagnostics(
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+):
+    _check_admin(x_admin_key)
+    return await _collect_network_diagnostics(request, include_outbound_ip=True)
+
+
+@api_router.get("/diagnostics/public")
+async def public_network_diagnostics(request: Request):
+    details = await _collect_network_diagnostics(
+        request,
+        include_outbound_ip=False,
+    )
+    forwarded = bool(request.headers.get('x-forwarded-host'))
+    return {
+        'checkedAt': details['checkedAt'],
+        'tunnel': {
+            'platform': details['tunnel']['platform'],
+            'active': forwarded or details['tunnel']['platform'] == 'Replit',
+            'protocol': details['tunnel']['protocol'],
+            'apiPath': details['tunnel']['apiPath'],
+        },
+        'runtime': details['runtime'],
+        'source': {
+            'origin': details['source']['origin'],
+            'directEnabled': details['source']['directEnabled'],
+        },
+        'relaySummary': {
+            'configured': len(details['relays']),
+        },
+        'proxyPool': details['proxyPool'],
+        'lastRequest': details['lastRequest'],
     }
 
 
@@ -1748,8 +1780,8 @@ async def _liens_by_tmdb(
     async def _bounded_search(query: str) -> list:
         try:
             return await asyncio.wait_for(
-                zt_search(query, type_, page_count=1, timeout=6, attempts=2),
-                timeout=8,
+                zt_search(query, type_, page_count=2, timeout=8, attempts=2),
+                timeout=10,
             )
         except Exception as exc:
             logger.warning('TMDB catalogue search failed: %s', type(exc).__name__)
@@ -1804,14 +1836,14 @@ async def _liens_by_tmdb(
         result['_matchScore'] = _tmdb_result_score(result, title_aliases, year)
     results.sort(key=lambda result: result.get('_matchScore', 0), reverse=True)
 
-    # The site's full-text search can return only partial-title matches while
-    # the exact item is already present in its recent catalog (e.g. Animals).
-    # Fall back only when text search did not produce a confident title match.
-    if not year and (not results or results[0].get('_matchScore', 0) < 60):
+    # Full-text search can miss an item that is already in the recent catalog.
+    # Do this even when TMDB supplied a release year: the catalog title can be
+    # correct while its search form ignores the added year or paginates poorly.
+    if not results or results[0].get('_matchScore', 0) < 60:
         try:
             latest = await asyncio.wait_for(
                 get_latest(type=type_, limit=48),
-                timeout=8,
+                timeout=14,
             )
         except Exception:
             latest = {'results': []}
@@ -2069,15 +2101,18 @@ async def get_latest(type: str = Query('movie'), limit: int = Query(24, le=48)):
         except (asyncio.TimeoutError, Exception):
             return None
 
-    # Fetch all paths in parallel, use first successful result
+    # Search all relevant listing pages, not just the first path that responds.
     fetched = await asyncio.gather(*[_try(p) for p in paths])
-    html = next((r for r in fetched if r), None)
-
-    if not html:
+    available_pages = [html for html in fetched if html]
+    if not available_pages:
         return {'type': type, 'total': 0, 'results': [],
                 'error': 'Site inaccessible — aucun proxy disponible'}
 
-    items = scrape_listing(html, BASE_URL)
+    items = [
+        item
+        for html in available_pages
+        for item in scrape_listing(html, BASE_URL)
+    ]
     # Filter by category BEFORE grouping (raw items have 'pageUrl')
     items = filter_by_category(items, t)
     results = group_results(items)

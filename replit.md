@@ -14,7 +14,7 @@ ZT Search provides a French-language interface for searching the configured cont
 ## Required Secrets
 
 - `ZT_ORIGIN_USERNAME` and `ZT_ORIGIN_PASSWORD` configure the direct source-site account.
-- `ADMIN_KEY` protects source settings and the network diagnostics panel.
+- `ADMIN_KEY` protects source settings and the full, private diagnostics endpoint.
 - `TMDB_API_KEY` enables TMDB-backed metadata.
 - Keep credentials in Replit Secrets. Do not paste credentials into source files or send authenticated session cookies through relays.
 
@@ -27,7 +27,7 @@ ZT Search provides a French-language interface for searching the configured cont
 
 ## Operations
 
-- The **Réseau** panel next to **Sources** shows administrator-only server, tunnel, relay, and outbound-IP diagnostics.
-- The outbound IP is checked through api.ipify.org when an administrator opens the diagnostics panel and while it remains open.
+- The **Réseau** panel next to **Sources** is available without a key and shows redacted server, tunnel, relay-count, and request-status diagnostics.
+- The full diagnostics endpoint remains administrator-only; it checks the outbound IP through api.ipify.org when requested.
 - Relay credentials, URL paths, query parameters, and the last proxy URL must not be exposed in public status responses or the diagnostics UI.
 - Search configuration and proxy-pool state are stored by the backend in its local SQLite state file.

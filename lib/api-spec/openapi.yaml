@@ -161,6 +161,20 @@ paths:
                 $ref: "#/components/schemas/NetworkDiagnostics"
         "401":
           description: Invalid administrator key
+  /diagnostics/public:
+    get:
+      operationId: getPublicNetworkDiagnostics
+      tags: [zt-search]
+      servers:
+        - url: /zt-api
+      summary: Read public network status without sensitive addresses
+      responses:
+        "200":
+          description: Public, redacted service diagnostics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NetworkDiagnosticsPublic"
   /settings:
     get:
       operationId: getSourceSettings
@@ -450,6 +464,53 @@ components:
             errorCount: { type: integer }
           required: [ok, source, at, errorCount]
       required: [checkedAt, outboundIp, tunnel, runtime, source, relays, proxyPool, lastRequest]
+    NetworkDiagnosticsPublic:
+      type: object
+      properties:
+        checkedAt: { type: number }
+        tunnel:
+          type: object
+          properties:
+            platform: { type: string }
+            active: { type: boolean }
+            protocol: { type: ["string", "null"] }
+            apiPath: { type: string }
+          required: [platform, active, protocol, apiPath]
+        runtime:
+          type: object
+          properties:
+            service: { type: string }
+            python: { type: string }
+            uptimeSeconds: { type: number }
+          required: [service, python, uptimeSeconds]
+        source:
+          type: object
+          properties:
+            origin: { type: string }
+            directEnabled: { type: boolean }
+          required: [origin, directEnabled]
+        relaySummary:
+          type: object
+          properties:
+            configured: { type: integer }
+          required: [configured]
+        proxyPool:
+          type: object
+          properties:
+            pool: { type: integer }
+            last_refill: { type: integer }
+            last_refill_found: { type: integer }
+            validations: { type: integer }
+          required: [pool, last_refill, last_refill_found, validations]
+        lastRequest:
+          type: object
+          properties:
+            ok: { type: ["boolean", "null"] }
+            source: { type: ["string", "null"] }
+            at: { type: ["number", "null"] }
+            errorCount: { type: integer }
+          required: [ok, source, at, errorCount]
+      required: [checkedAt, tunnel, runtime, source, relaySummary, proxyPool, lastRequest]
     OkResponse:
       type: object
       properties:

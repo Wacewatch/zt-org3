@@ -29,6 +29,7 @@ import type {
   LatestResponse,
   LinksResponse,
   NetworkDiagnostics,
+  NetworkDiagnosticsPublic,
   OkResponse,
   SearchContentParams,
   SearchResponse,
@@ -698,6 +699,83 @@ export function useGetNetworkDiagnostics<TData = Awaited<ReturnType<typeof getNe
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 
   const queryOptions = getGetNetworkDiagnosticsQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getGetPublicNetworkDiagnosticsUrl = () => {
+
+
+
+
+  return `/api/diagnostics/public`
+}
+
+/**
+ * @summary Read public network status without sensitive addresses
+ */
+export const getPublicNetworkDiagnostics = async ( options?: Parameters<typeof customFetch>[1]): Promise<NetworkDiagnosticsPublic> => {
+
+  return customFetch<NetworkDiagnosticsPublic>(getGetPublicNetworkDiagnosticsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetPublicNetworkDiagnosticsQueryKey = () => {
+    return [
+    `/api/diagnostics/public`
+    ] as const;
+    }
+
+
+export const getGetPublicNetworkDiagnosticsQueryOptions = <TData = Awaited<ReturnType<typeof getPublicNetworkDiagnostics>>, TError = ErrorType<unknown>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getPublicNetworkDiagnostics>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetPublicNetworkDiagnosticsQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getPublicNetworkDiagnostics>>> = ({ signal }) => getPublicNetworkDiagnostics({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getPublicNetworkDiagnostics>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetPublicNetworkDiagnosticsQueryResult = NonNullable<Awaited<ReturnType<typeof getPublicNetworkDiagnostics>>>
+export type GetPublicNetworkDiagnosticsQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary Read public network status without sensitive addresses
+ */
+
+export function useGetPublicNetworkDiagnostics<TData = Awaited<ReturnType<typeof getPublicNetworkDiagnostics>>, TError = ErrorType<unknown>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getPublicNetworkDiagnostics>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetPublicNetworkDiagnosticsQueryOptions(options)
 
   const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
 

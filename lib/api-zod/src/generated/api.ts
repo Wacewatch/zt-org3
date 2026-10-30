@@ -257,6 +257,44 @@ export const GetNetworkDiagnosticsResponse = zod.object({
 
 
 /**
+ * @summary Read public network status without sensitive addresses
+ */
+export const GetPublicNetworkDiagnosticsResponse = zod.object({
+  "checkedAt": zod.number(),
+  "tunnel": zod.object({
+  "platform": zod.string(),
+  "active": zod.boolean(),
+  "protocol": zod.string().nullable(),
+  "apiPath": zod.string()
+}),
+  "runtime": zod.object({
+  "service": zod.string(),
+  "python": zod.string(),
+  "uptimeSeconds": zod.number()
+}),
+  "source": zod.object({
+  "origin": zod.string(),
+  "directEnabled": zod.boolean()
+}),
+  "relaySummary": zod.object({
+  "configured": zod.number().int()
+}),
+  "proxyPool": zod.object({
+  "pool": zod.number().int(),
+  "last_refill": zod.number().int(),
+  "last_refill_found": zod.number().int(),
+  "validations": zod.number().int()
+}),
+  "lastRequest": zod.object({
+  "ok": zod.boolean().nullable(),
+  "source": zod.string().nullable(),
+  "at": zod.number().nullable(),
+  "errorCount": zod.number().int()
+})
+})
+
+
+/**
  * @summary Read source settings
  */
 export const GetSourceSettingsHeader = zod.object({
